@@ -1,0 +1,13 @@
+column_count: 6
+columns:
+- engagement_score
+- website_visits
+- email_opens
+- company_size
+- days_since_contact
+- converted
+data_hash: bd85c6fc0337216578c71d4a4bfe6d285c4fdea6163d8763cd36078d419873b9
+row_count: 1000
+snapshot_path: ./data/snapshots/retrain_20251204_20251204_122549.parquet
+timestamp: '20251204_122549'
+version_tag: retrain_20251204

@@ -1,0 +1,367 @@
+# Lead Scoring Model CI/CD Pipeline
+# Automated testing, validation, and deployment
+
+name: ML Model CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'config/**'
+      - 'tests/**'
+      - 'requirements.txt'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment to production'
+        required: false
+        default: 'false'
+
+env:
+  PYTHON_VERSION: '3.10'
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+
+jobs:
+  # ============================================
+  # Stage 1: Code Quality & Unit Tests
+  # ============================================
+  test:
+    name: Code Quality & Unit Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov black flake8 mypy
+      
+      - name: Code formatting check (Black)
+        run: black --check src/ tests/
+      
+      - name: Linting (Flake8)
+        run: flake8 src/ --max-line-length=120 --ignore=E501,W503
+      
+      - name: Type checking (MyPy)
+        run: mypy src/ --ignore-missing-imports
+        continue-on-error: true
+      
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ -v \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --junitxml=test-results.xml
+      
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            htmlcov/
+
+  # ============================================
+  # Stage 2: Model Validation
+  # ============================================
+  validate-model:
+    name: Model Validation
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Validate model artifacts
+        run: |
+          python scripts/validate_model.py \
+            --model-path models/latest \
+            --check-signature \
+            --check-dependencies
+      
+      - name: Run model quality checks
+        run: |
+          python scripts/model_quality_checks.py \
+            --min-auc 0.75 \
+            --max-latency-ms 200 \
+            --min-precision-at-10 0.50
+      
+      - name: Test model inference
+        run: |
+          python scripts/test_inference.py \
+            --num-samples 100 \
+            --check-output-schema
+
+  # ============================================
+  # Stage 3: Integration Tests
+  # ============================================
+  integration-test:
+    name: Integration Tests
+    needs: validate-model
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Start API server
+        run: |
+          uvicorn src.model_serving:app --host 0.0.0.0 --port 8000 &
+          sleep 5
+      
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v \
+            --junitxml=integration-results.xml
+      
+      - name: Test API endpoints
+        run: |
+          # Health check
+          curl -f http://localhost:8000/health
+          
+          # Single prediction
+          curl -f -X POST http://localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"lead_id": "test-1", "lead_source": "Web", "industry": "Tech", "company_size": 100, "engagement_score": 75.0}'
+          
+          # Batch prediction
+          curl -f -X POST http://localhost:8000/predict/batch \
+            -H "Content-Type: application/json" \
+            -d '{"leads": [{"lead_id": "test-1", "lead_source": "Web", "industry": "Tech", "company_size": 100, "engagement_score": 75.0}]}'
+
+  # ============================================
+  # Stage 4: Deploy to Staging
+  # ============================================
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Deploy model to staging
+        run: |
+          python scripts/deploy_model.py \
+            --stage Staging \
+            --endpoint lead-scoring-staging \
+            --model-name lead-scoring-production
+      
+      - name: Run smoke tests
+        run: |
+          python scripts/smoke_tests.py \
+            --endpoint https://staging.api.rakez.com/lead-scoring \
+            --num-requests 10
+      
+      - name: Start shadow deployment
+        run: |
+          python scripts/shadow_deployment.py \
+            --start \
+            --duration-hours 24 \
+            --endpoint staging
+      
+      - name: Notify staging deployment
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: 'ml-deployments'
+          slack-message: "🚀 Model deployed to staging - ${{ github.sha }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  # ============================================
+  # Stage 5: Shadow Mode Validation
+  # ============================================
+  shadow-validation:
+    name: Shadow Mode Validation
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Wait for shadow data collection
+        run: |
+          echo "Waiting for shadow deployment data..."
+          sleep 300  # 5 minutes for demo, would be 24 hours in production
+      
+      - name: Analyze shadow results
+        id: shadow-check
+        run: |
+          python scripts/analyze_shadow_results.py \
+            --min-correlation 0.95 \
+            --min-predictions 100 \
+            --output shadow-report.json
+          
+          # Set output for next steps
+          echo "shadow_passed=$(cat shadow-report.json | jq -r '.passed')" >> $GITHUB_OUTPUT
+      
+      - name: Upload shadow report
+        uses: actions/upload-artifact@v3
+        with:
+          name: shadow-report
+          path: shadow-report.json
+
+  # ============================================
+  # Stage 6: Deploy to Production
+  # ============================================
+  deploy-production:
+    name: Deploy to Production
+    needs: shadow-validation
+    if: github.ref == 'refs/heads/main' && (needs.shadow-validation.outputs.shadow_passed == 'true' || github.event.inputs.force_deploy == 'true')
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Backup current production model
+        run: |
+          python scripts/backup_model.py \
+            --model-name lead-scoring-production \
+            --stage Production
+      
+      - name: Deploy to production (Canary)
+        run: |
+          python scripts/deploy_model.py \
+            --stage Production \
+            --endpoint lead-scoring-production \
+            --model-name lead-scoring-production \
+            --canary-percentage 10
+      
+      - name: Monitor canary deployment
+        run: |
+          python scripts/monitor_canary.py \
+            --duration-minutes 30 \
+            --error-threshold 5 \
+            --latency-threshold 200
+      
+      - name: Full production rollout
+        run: |
+          python scripts/deploy_model.py \
+            --stage Production \
+            --endpoint lead-scoring-production \
+            --model-name lead-scoring-production \
+            --canary-percentage 100
+      
+      - name: Production health check
+        run: |
+          python scripts/health_check.py \
+            --endpoint https://api.rakez.com/lead-scoring \
+            --expected-model-version ${{ github.sha }}
+      
+      - name: Notify production deployment
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: 'ml-deployments'
+          slack-message: "✅ Model deployed to PRODUCTION - ${{ github.sha }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      
+      - name: Update deployment tracking
+        run: |
+          python scripts/track_deployment.py \
+            --model-version ${{ github.sha }} \
+            --environment production \
+            --status success
+
+  # ============================================
+  # Rollback Job (Manual Trigger)
+  # ============================================
+  rollback:
+    name: Rollback Production
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.rollback == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Rollback to previous version
+        run: |
+          python scripts/rollback_model.py \
+            --model-name lead-scoring-production \
+            --rollback-to-previous
+      
+      - name: Verify rollback
+        run: |
+          python scripts/health_check.py \
+            --endpoint https://api.rakez.com/lead-scoring
+      
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: 'ml-alerts'
+          slack-message: "⚠️ Production ROLLBACK executed"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+

@@ -1,0 +1,155 @@
+# Lead Scoring Model Training Configuration
+# This file defines all parameters for reproducible training
+
+experiment:
+  name: "lead_scoring_v2"
+  description: "Lead scoring model for RAKEZ CRM - predicting lead conversion probability"
+  owner: "ml-team@rakez.com"
+
+data:
+  source_table: "leads.features_silver"
+  snapshot_version: "v2.1"
+  train_test_split: 0.2
+  validation_split: 0.1
+  random_seed: 42
+  
+  # Feature groups
+  features:
+    numerical:
+      - engagement_score
+      - website_visits
+      - email_opens
+      - email_clicks
+      - days_since_first_contact
+      - company_size
+      - page_views
+      - form_submissions
+    
+    categorical:
+      - lead_source
+      - industry
+      - region
+      - company_type
+    
+    target: converted
+
+model:
+  algorithm: "xgboost"
+  
+  hyperparameters:
+    max_depth: 6
+    learning_rate: 0.1
+    n_estimators: 200
+    min_child_weight: 3
+    subsample: 0.8
+    colsample_bytree: 0.8
+    gamma: 0
+    reg_alpha: 0
+    reg_lambda: 1
+    random_state: 42
+    
+  # Hyperparameter search space for tuning
+  search_space:
+    max_depth: [4, 6, 8]
+    learning_rate: [0.05, 0.1, 0.2]
+    n_estimators: [100, 200, 300]
+    min_child_weight: [1, 3, 5]
+    subsample: [0.7, 0.8, 0.9]
+
+training:
+  cross_validation_folds: 5
+  early_stopping_rounds: 50
+  optimization_metric: "auc"
+  
+  # Class imbalance handling
+  class_weight: "balanced"
+  
+  # Feature preprocessing
+  preprocessing:
+    numerical_imputer: "median"
+    categorical_imputer: "most_frequent"
+    scaler: "standard"
+
+validation:
+  min_auc: 0.75
+  min_precision_at_10: 0.50
+  min_recall: 0.60
+  max_calibration_error: 0.10
+  
+  # Comparison with production
+  min_improvement_vs_production: -0.05  # Allow up to 5% degradation
+
+retraining:
+  triggers:
+    scheduled_days: 7
+    drift_psi_threshold: 0.2
+    performance_auc_threshold: 0.75
+    min_new_samples: 5000
+  
+  # Shadow deployment settings
+  shadow_deployment:
+    duration_hours: 24
+    min_predictions: 1000
+    min_correlation: 0.95
+
+monitoring:
+  # Data drift thresholds
+  drift:
+    psi_warning: 0.1
+    psi_critical: 0.25
+    ks_warning: 0.1
+    ks_critical: 0.2
+  
+  # Performance thresholds
+  performance:
+    latency_p95_warning_ms: 200
+    latency_p95_critical_ms: 500
+    error_rate_warning_pct: 1.0
+    error_rate_critical_pct: 5.0
+  
+  # Business thresholds
+  business:
+    conversion_drop_warning_pct: 10
+    conversion_drop_critical_pct: 20
+
+deployment:
+  model_name: "lead-scoring-production"
+  endpoint_name: "lead-scoring-endpoint"
+  
+  stages:
+    - Development
+    - Staging  
+    - Production
+    - Archived
+  
+  # Canary deployment
+  canary:
+    initial_traffic_pct: 5
+    increment_pct: 10
+    max_traffic_pct: 100
+    rollback_threshold_pct: 20
+
+alerting:
+  channels:
+    info:
+      - slack_general
+    warning:
+      - slack_ml_alerts
+      - email_team
+    critical:
+      - slack_ml_alerts
+      - pagerduty
+      - email_oncall
+  
+  # Slack configuration
+  slack:
+    webhook_url: "${SLACK_WEBHOOK_URL}"
+    channels:
+      general: "#ml-general"
+      alerts: "#ml-alerts"
+  
+  # PagerDuty configuration
+  pagerduty:
+    routing_key: "${PAGERDUTY_ROUTING_KEY}"
+    service_id: "lead-scoring"
+
