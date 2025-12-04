@@ -2,8 +2,8 @@
 
 ## ML Engineer Case Study Submission
 
-**Prepared by:** [Your Name]  
-**Date:** December 2024  
+**Prepared by:** Maria Muneeb 
+**Date:** December 2025  
 **Role:** Machine Learning Engineer
 
 ---
